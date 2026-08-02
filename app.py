@@ -778,13 +778,16 @@ def run_app() -> None:
         [data-testid="stSidebar"] label,[data-testid="stSidebar"] p{color:#e9f4ef!important}
         div[data-testid="stFileUploader"]{background:#fff;border:1px solid #dfe7e3;padding:12px}
         div[data-testid="stFileUploader"] small{display:none!important}
-        div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"]{background:#fff;border:1px solid #dfe7e3;border-radius:9px;box-shadow:0 8px 22px rgba(16,24,32,.06);padding:.42rem;transition:transform .2s,box-shadow .2s,border-color .2s}
-        div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"]:hover{transform:translateY(-3px);border-color:#00b67a;box-shadow:0 13px 28px rgba(16,24,32,.11)}
-        div[data-testid="stColumn"] div[data-testid="stIFrame"]{border:0;border-radius:5px;overflow:hidden;box-shadow:none}
-        div[data-testid="stColumn"] .stButton button{min-height:2.55rem;font-weight:750;border-radius:5px}
-        .gallery-note{margin:.1rem 0 1rem;color:#66747d}
+        div[data-testid="stColumn"]:has(.design-rail-marker){position:sticky;top:.75rem;align-self:flex-start}
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.design-card-marker){background:#fff;border:1px solid #dfe7e3;border-radius:9px;box-shadow:0 7px 18px rgba(16,24,32,.06);padding:.4rem;transition:transform .2s,box-shadow .2s,border-color .2s}
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.design-card-marker):hover{transform:translateY(-2px);border-color:#00b67a;box-shadow:0 11px 24px rgba(16,24,32,.10)}
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.design-card-marker) div[data-testid="stIFrame"]{border:0;border-radius:5px;overflow:hidden;box-shadow:none}
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.design-card-marker) .stButton button{min-height:2.45rem;font-weight:750;border-radius:5px;font-size:.82rem}
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.design-card-marker) button[kind="primary"],div[data-testid="stVerticalBlockBorderWrapper"]:has(.design-card-marker) button[data-testid="baseButton-primary"]{background:#00b67a;border-color:#00b67a;color:#101820}
+        .design-rail-marker{display:none}.design-card-marker{display:none}.gallery-note{margin:.1rem 0 .65rem;color:#66747d;font-size:.88rem}
         .selected-design{padding:13px 16px;margin:10px 0 14px;border-left:4px solid #00b67a;border-radius:5px;background:#fff;box-shadow:0 8px 22px rgba(16,24,32,.05)}
         .selected-design strong{display:block;color:#101820;font-size:1.05rem;margin-bottom:2px}.selected-design span{color:#66747d;font-size:.9rem}
+        @media(max-width:900px){div[data-testid="stColumn"]:has(.design-rail-marker){position:static}}
         </style>""",
         unsafe_allow_html=True,
     )
@@ -792,17 +795,21 @@ def run_app() -> None:
     st.title("Automatic Table & Chart Builder")
     st.caption("Upload a data file, choose a sleek layout, preview it and download a standalone web page.")
 
-    uploaded = st.file_uploader("Upload a Data File", type=["csv", "tsv", "txt", "xls", "xlsx", "xlsm"])
-    use_demo = st.checkbox("Use Demonstration Data", value=uploaded is None)
+    workspace_column, design_column = st.columns([4.35, 1.15], gap="large")
+    with workspace_column:
+        uploaded = st.file_uploader("Upload a Data File", type=["csv", "tsv", "txt", "xls", "xlsx", "xlsm"])
+        use_demo = st.checkbox("Use Demonstration Data", value=uploaded is None)
 
     if uploaded is None and not use_demo:
-        st.info("Upload a file or turn on demonstration data to begin.")
+        with workspace_column:
+            st.info("Upload a file or turn on demonstration data to begin.")
         return
 
     try:
         dataset = sample_dataset() if uploaded is None else parse_uploaded_file(uploaded.getvalue(), uploaded.name)
     except Exception as exc:
-        st.error(f"Could not read the file: {exc}")
+        with workspace_column:
+            st.error(f"Could not read the file: {exc}")
         return
 
     frame = dataset.frame
@@ -842,15 +849,16 @@ def run_app() -> None:
         st.session_state.gallery_page = 0
     st.session_state.gallery_page = min(st.session_state.gallery_page, total_gallery_pages - 1)
 
-    st.subheader("Choose a Design")
-    st.markdown('<div class="gallery-note">Select any preview card to apply that design instantly.</div>', unsafe_allow_html=True)
     page_start = st.session_state.gallery_page * cards_per_page
     page_visuals = list(enumerate(VISUALS[page_start:page_start + cards_per_page], start=page_start))
-    for row_start in range(0, len(page_visuals), 5):
-        gallery_columns = st.columns(5, gap="small")
-        for column, (visual_index, visual) in zip(gallery_columns, page_visuals[row_start:row_start + 5]):
-            with column:
+    with design_column:
+        st.markdown('<span class="design-rail-marker"></span>', unsafe_allow_html=True)
+        st.subheader("Designs")
+        st.markdown('<div class="gallery-note">Choose a preview to update the workspace.</div>', unsafe_allow_html=True)
+        with st.container(height=830, border=False):
+            for visual_index, visual in page_visuals:
                 with st.container(border=True):
+                    st.markdown('<span class="design-card-marker"></span>', unsafe_allow_html=True)
                     miniature_html = generate_html(
                         frame,
                         final_metadata,
@@ -876,69 +884,68 @@ def run_app() -> None:
                         st.session_state.visual_index = visual_index
                         st.rerun()
 
-    if total_gallery_pages > 1:
-        previous_page, page_status, next_page = st.columns([1, 3, 1])
-        with previous_page:
-            if st.button("Previous Designs", disabled=st.session_state.gallery_page == 0, use_container_width=True):
-                st.session_state.gallery_page -= 1
-                st.rerun()
-        with page_status:
-            st.markdown(
-                f'<p style="text-align:center;color:#66747d">Page {st.session_state.gallery_page + 1} of {total_gallery_pages}</p>',
-                unsafe_allow_html=True,
-            )
-        with next_page:
-            if st.button("Next Designs", disabled=st.session_state.gallery_page >= total_gallery_pages - 1, use_container_width=True):
-                st.session_state.gallery_page += 1
-                st.rerun()
+        if total_gallery_pages > 1:
+            previous_page, next_page = st.columns(2, gap="small")
+            with previous_page:
+                if st.button("Previous", disabled=st.session_state.gallery_page == 0, use_container_width=True):
+                    st.session_state.gallery_page -= 1
+                    st.rerun()
+            with next_page:
+                if st.button("Next", disabled=st.session_state.gallery_page >= total_gallery_pages - 1, use_container_width=True):
+                    st.session_state.gallery_page += 1
+                    st.rerun()
+            st.caption(f"Page {st.session_state.gallery_page + 1} of {total_gallery_pages}")
 
     selected = VISUALS[st.session_state.visual_index]
-    st.markdown(
-        f'<div class="selected-design"><strong>{selected["name"]}</strong><span>{selected["description"]}</span></div>',
-        unsafe_allow_html=True,
-    )
+    with workspace_column:
+        st.markdown(
+            f'<div class="selected-design"><strong>{selected["name"]}</strong><span>{selected["description"]}</span></div>',
+            unsafe_allow_html=True,
+        )
 
-    control_cols = st.columns(4)
-    label_column = control_cols[0].selectbox(
-        "Category / Label",
-        list(frame.columns),
-        index=list(frame.columns).index(label_default),
-        format_func=smart_title_case,
-    )
-    value_column = control_cols[1].selectbox("Primary Measure", numerics or list(frame.columns), index=0, format_func=smart_title_case)
-    second_options = ["None"] + numerics
-    second_pick = control_cols[2].selectbox("Second Measure", second_options, index=0, format_func=smart_title_case)
-    second_value = None if second_pick == "None" else second_pick
-    metric_column = control_cols[3].selectbox(
-        "Ranking Data Bar",
-        ["None"] + numerics,
-        index=1 if numerics else 0,
-        format_func=smart_title_case,
-    )
-    metric_column = None if metric_column == "None" else metric_column
-    row_limit = st.slider("Maximum Chart Categories", 3, 30, min(12, max(3, len(frame))))
-    output_html = generate_html(
-        frame,
-        final_metadata,
-        visual_key=selected["key"],
-        theme_name=theme_name,
-        label_column=label_column,
-        value_column=value_column,
-        second_value=second_value,
-        metric_column=metric_column,
-        row_limit=row_limit,
-    )
+        with st.expander("Preview Settings", expanded=False):
+            control_cols = st.columns(4)
+            label_column = control_cols[0].selectbox(
+                "Category / Label",
+                list(frame.columns),
+                index=list(frame.columns).index(label_default),
+                format_func=smart_title_case,
+            )
+            value_column = control_cols[1].selectbox("Primary Measure", numerics or list(frame.columns), index=0, format_func=smart_title_case)
+            second_options = ["None"] + numerics
+            second_pick = control_cols[2].selectbox("Second Measure", second_options, index=0, format_func=smart_title_case)
+            second_value = None if second_pick == "None" else second_pick
+            metric_column = control_cols[3].selectbox(
+                "Ranking Data Bar",
+                ["None"] + numerics,
+                index=1 if numerics else 0,
+                format_func=smart_title_case,
+            )
+            metric_column = None if metric_column == "None" else metric_column
+            row_limit = st.slider("Maximum Chart Categories", 3, 30, min(12, max(3, len(frame))))
 
-    preview_tab, data_tab, help_tab = st.tabs(["Preview", "Data", "File Format"])
-    with preview_tab:
-        components.html(output_html, height=820, scrolling=True)
-    with data_tab:
-        display_frame = frame.rename(columns={column: smart_title_case(column) for column in frame.columns})
-        st.dataframe(display_frame, use_container_width=True, height=520)
-        st.caption(f"{len(frame):,} rows · {len(frame.columns)} columns")
-    with help_tab:
-        st.code(
-            """# title: Optional heading
+        output_html = generate_html(
+            frame,
+            final_metadata,
+            visual_key=selected["key"],
+            theme_name=theme_name,
+            label_column=label_column,
+            value_column=value_column,
+            second_value=second_value,
+            metric_column=metric_column,
+            row_limit=row_limit,
+        )
+
+        preview_tab, data_tab, help_tab = st.tabs(["Preview", "Data", "File Format"])
+        with preview_tab:
+            components.html(output_html, height=820, scrolling=True)
+        with data_tab:
+            display_frame = frame.rename(columns={column: smart_title_case(column) for column in frame.columns})
+            st.dataframe(display_frame, use_container_width=True, height=520)
+            st.caption(f"{len(frame):,} rows · {len(frame.columns)} columns")
+        with help_tab:
+            st.code(
+                """# title: Optional heading
 # subtitle: Optional explanatory line
 # footer: Optional note shown below the visual
 # source: Optional source label
@@ -949,13 +956,16 @@ Rank,State,Score,Implied Probability
 1,California,92.4,12.8
 2,Arizona,88.6,11.9
 3,Utah,85.1,11.1""",
-            language="text",
-        )
-        st.write("All `#` metadata lines are optional. A normal data file beginning with its header row works too.")
+                language="text",
+            )
+            st.write("All `#` metadata lines are optional. A normal data file beginning with its header row works too.")
 
-    filename = safe_id(title or "data-visualisation") + ".html"
-    st.download_button("Download Selected Web Page", output_html.encode("utf-8"), filename, "text/html", type="primary")
-    st.download_button("Download Cleaned Data", frame.to_csv(index=False).encode("utf-8"), "cleaned-data.csv", "text/csv")
+        filename = safe_id(title or "data-visualisation") + ".html"
+        download_columns = st.columns(2)
+        with download_columns[0]:
+            st.download_button("Download Selected Web Page", output_html.encode("utf-8"), filename, "text/html", type="primary", use_container_width=True)
+        with download_columns[1]:
+            st.download_button("Download Cleaned Data", frame.to_csv(index=False).encode("utf-8"), "cleaned-data.csv", "text/csv", use_container_width=True)
 
 
 def main() -> None:
