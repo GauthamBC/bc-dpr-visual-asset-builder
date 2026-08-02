@@ -34,6 +34,8 @@ META_KEYS = {
     "accent",
 }
 
+TITLE_SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or", "the", "to", "vs", "with"}
+
 THEMES = {
     "Action Green": {
         "accent": "#00b67a",
@@ -90,7 +92,7 @@ VISUALS = [
         "key": "editorial_table",
         "name": "Editorial Table",
         "kind": "table",
-        "description": "Full interactive table with search, sorting and CSV download.",
+        "description": "Full interactive table with search, sorting and a data download.",
     },
     {
         "key": "ranking_table",
@@ -154,6 +156,29 @@ def clean_column_name(value: Any) -> str:
     return text or "Untitled column"
 
 
+def smart_title_case(value: Any) -> str:
+    """Apply strict editorial title case without all-capital words."""
+    text = str(value).strip()
+    if not text:
+        return ""
+    parts = re.split(r"(\s+|[·|:–—/\-])", text)
+    word_positions = [i for i, part in enumerate(parts) if part and not re.fullmatch(r"\s+|[·|:–—/\-]", part)]
+    last_position = word_positions[-1] if word_positions else -1
+    for position in word_positions:
+        token = parts[position]
+        match = re.match(r"^([^A-Za-z0-9]*)(.*?)([^A-Za-z0-9]*)$", token)
+        if not match:
+            continue
+        prefix, core, suffix = match.groups()
+        lower = core.lower()
+        if position != word_positions[0] and position != last_position and lower in TITLE_SMALL_WORDS:
+            converted = lower
+        else:
+            converted = lower[:1].upper() + lower[1:]
+        parts[position] = f"{prefix}{converted}{suffix}"
+    return "".join(parts)
+
+
 def parse_metadata_csv(raw: bytes, encoding: str = "utf-8-sig") -> Dataset:
     """Read optional '# key: value' lines, then parse the normal CSV table."""
     text = raw.decode(encoding, errors="replace")
@@ -176,7 +201,7 @@ def parse_metadata_csv(raw: bytes, encoding: str = "utf-8-sig") -> Dataset:
         data_lines.append(line)
 
     if not data_lines:
-        raise ValueError("No CSV header row or table data was found.")
+        raise ValueError("No table header row or data was found.")
 
     data_text = "\n".join(data_lines)
     try:
@@ -196,7 +221,7 @@ def parse_uploaded_file(raw: bytes, filename: str, sheet_name: str | int = 0) ->
     if suffix in {".xlsx", ".xlsm", ".xls"}:
         frame = pd.read_excel(io.BytesIO(raw), sheet_name=sheet_name)
         return Dataset(normalize_frame(frame), {})
-    raise ValueError("Please upload a CSV, TSV, XLS or XLSX file.")
+    raise ValueError("Please upload a supported data file.")
 
 
 def normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -263,6 +288,60 @@ def format_value(value: Any, column: str, series: pd.Series) -> str:
     return f"{number:,.2f}".rstrip("0").rstrip(".")
 
 
+def animated_number_markup(value: Any, column: str, series: pd.Series, extra_class: str = "") -> str:
+    """Return a safely formatted number that counts up in generated HTML."""
+    if value is None or pd.isna(value):
+        return "—"
+    if not pd.api.types.is_numeric_dtype(series):
+        return html.escape(str(value))
+    number = float(value)
+    kind = infer_format(column, series)
+    symbol = ""
+    if kind == "currency":
+        symbol = "£" if "gbp" in column.lower() else "€" if "eur" in column.lower() else "$"
+    classes = "animated-number" + (f" {extra_class}" if extra_class else "")
+    fallback = html.escape(format_value(number, column, series))
+    return (
+        f'<span class="{classes}" data-animate-number="{number}" '
+        f'data-number-kind="{kind}" data-number-prefix="{html.escape(symbol, quote=True)}">{fallback}</span>'
+    )
+
+
+def animation_script() -> str:
+    return """
+    (() => {
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const formatNumber = (value, kind, prefix) => {
+        if (kind === 'percent') return value.toLocaleString(undefined,{maximumFractionDigits:1,minimumFractionDigits:1}) + '%';
+        if (kind === 'currency') return prefix + value.toLocaleString(undefined,{maximumFractionDigits:0});
+        if (kind === 'integer') return value.toLocaleString(undefined,{maximumFractionDigits:0});
+        if (kind === 'compact') return new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value);
+        return value.toLocaleString(undefined,{maximumFractionDigits:2});
+      };
+      document.querySelectorAll('[data-animate-number]').forEach((element,index) => {
+        const target = Number(element.dataset.animateNumber);
+        const kind = element.dataset.numberKind || 'decimal';
+        const prefix = element.dataset.numberPrefix || '';
+        if (!Number.isFinite(target) || reduceMotion) {
+          if (Number.isFinite(target)) element.textContent = formatNumber(target,kind,prefix);
+          return;
+        }
+        const duration = 1050;
+        const delay = Math.min(index * 45, 360);
+        const start = performance.now() + delay;
+        const tick = now => {
+          if (now < start) { requestAnimationFrame(tick); return; }
+          const progress = Math.min((now-start)/duration,1);
+          const eased = 1-Math.pow(1-progress,4);
+          element.textContent = formatNumber(target*eased,kind,prefix);
+          if (progress < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+    })();
+    """
+
+
 def safe_id(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", value).strip("-").lower() or "data-viz"
 
@@ -309,73 +388,97 @@ def merge_theme(theme_name: str, accent_override: str = "") -> dict[str, str]:
     return theme
 
 
-def base_css(theme: dict[str, str], compact: bool = False) -> str:
+def base_css(theme: dict[str, str], compact: bool = False, preview: bool = False) -> str:
     pad = "10px 12px" if compact else "14px 15px"
     font_size = "13px" if compact else "14.5px"
+    preview_css = """
+    .viz-shell{box-shadow:none;border-radius:4px}.hero{padding:18px 22px 17px}h1{font-size:28px;margin:5px 0 6px}
+    .brand{font-size:9px}.subtitle{font-size:11px;line-height:1.35}.content{padding:12px}.toolbar{margin-bottom:8px}
+    .toolbar .btn{display:none}.search input{padding:7px 10px 7px 30px;font-size:11px}.search:before{left:10px;top:3px}
+    .table-wrap{max-height:185px}table{min-width:560px;font-size:9.5px}thead th,tbody td{padding:7px 8px}
+    thead th{font-size:8px}.rank-badge{min-width:21px;height:21px}.metric{min-width:115px;grid-template-columns:1fr 45px}
+    .chart-wrap{padding:13px}.chart-title{font-size:14px;margin-bottom:8px}.chart-svg{min-width:0}.footer{padding:7px 12px;font-size:8.5px}
+    """ if preview else ""
     return f"""
     :root{{--accent:{theme['accent']};--accent-bright:{theme['accent_bright']};--accent-dark:{theme['accent_dark']};
       --navy:{theme['navy']};--navy-2:{theme['navy_2']};--bg:{theme['background']};--surface:{theme['surface']};
       --text:{theme['text']};--muted:{theme['muted']};--border:{theme['border']};}}
     *{{box-sizing:border-box}} html,body{{margin:0;padding:0;background:var(--bg);color:var(--text)}}
     body{{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;line-height:1.55}}
-    .viz-shell{{width:100%;max-width:1180px;margin:0 auto;background:var(--bg);overflow:hidden;border:1px solid var(--border);
-      box-shadow:0 18px 46px rgba(16,24,32,.10)}}
+    .viz-shell{{width:100%;max-width:1180px;margin:0 auto;background:var(--bg);overflow:hidden;border:1px solid var(--border);border-radius:6px;
+      box-shadow:0 18px 46px rgba(16,24,32,.10);animation:shellRise .72s cubic-bezier(.2,.72,.2,1) both}}
     .hero{{position:relative;padding:34px clamp(20px,4vw,52px) 30px;color:#fff;background:
       radial-gradient(750px 260px at 85% -15%,color-mix(in srgb,var(--accent) 25%,transparent),transparent 65%),
       linear-gradient(145deg,var(--navy),var(--navy-2));overflow:hidden}}
     .hero:after{{content:"";position:absolute;inset:0;pointer-events:none;background-image:
       linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px);
       background-size:48px 48px;mask-image:linear-gradient(to left,#000,transparent 75%)}}
-    .brand{{position:relative;z-index:1;font-weight:800;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent-bright)}}
+    .brand{{position:relative;z-index:1;font-weight:800;font-size:12px;letter-spacing:.14em;color:var(--accent-bright);animation:fadeUp .72s .08s both}}
     h1{{position:relative;z-index:1;margin:9px 0 10px;font-family:"Arial Narrow",Impact,Inter,sans-serif;font-size:clamp(34px,5vw,62px);
-      line-height:.98;letter-spacing:-.01em;text-transform:uppercase}}
-    .subtitle{{position:relative;z-index:1;max-width:850px;margin:0;color:rgba(255,255,255,.78);font-size:16px}}
-    .content{{padding:clamp(18px,3vw,34px)}}
+      line-height:.98;letter-spacing:-.01em;animation:fadeUp .78s .14s both}}
+    .subtitle{{position:relative;z-index:1;max-width:850px;margin:0;color:rgba(255,255,255,.78);font-size:16px;animation:fadeUp .78s .22s both}}
+    .content{{padding:clamp(18px,3vw,34px);animation:fadeUp .82s .28s both}}
     .toolbar{{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px}}
     .search{{position:relative;flex:1 1 260px}} .search input{{width:100%;border:1px solid var(--border);background:#fff;color:var(--text);
       padding:11px 14px 11px 38px;font:inherit}} .search:before{{content:"⌕";position:absolute;left:13px;top:8px;color:var(--muted);font-size:20px}}
-    .btn{{appearance:none;border:1px solid var(--border);background:#fff;color:var(--text);font-weight:750;letter-spacing:.04em;padding:10px 14px;cursor:pointer}}
-    .btn:hover{{border-color:var(--accent);color:var(--accent-dark)}} .count{{font-size:12px;color:var(--muted);margin-left:auto}}
+    .btn{{appearance:none;border:1px solid var(--border);border-radius:5px;background:#fff;color:var(--text);font-weight:750;letter-spacing:.04em;padding:10px 14px;cursor:pointer;transition:transform .2s,border-color .2s,color .2s,box-shadow .2s}}
+    .btn:hover{{border-color:var(--accent);color:var(--accent-dark);transform:translateY(-2px);box-shadow:0 8px 20px rgba(16,24,32,.08)}} .count{{font-size:12px;color:var(--muted);margin-left:auto}}
     .table-wrap{{overflow:auto;border:1px solid var(--border);max-height:720px;scrollbar-color:var(--accent) #edf2ef}}
     table{{width:100%;border-collapse:collapse;min-width:760px;background:#fff;font-size:{font_size}}}
     thead th{{position:sticky;top:0;z-index:2;text-align:left;background:var(--navy);color:#fff;padding:{pad};white-space:nowrap;
-      font-size:12px;letter-spacing:.09em;text-transform:uppercase;cursor:pointer;user-select:none}}
+      font-size:12px;letter-spacing:.035em;cursor:pointer;user-select:none}}
     thead th:hover{{background:var(--navy-2)}} .sort{{margin-left:6px;color:var(--accent-bright);opacity:.45}}
     tbody td{{padding:{pad};border-bottom:1px solid var(--border);vertical-align:middle}}
+    tbody tr{{animation:rowRise .52s cubic-bezier(.2,.72,.2,1) both}} tbody tr:nth-child(1){{animation-delay:.04s}} tbody tr:nth-child(2){{animation-delay:.08s}}
+    tbody tr:nth-child(3){{animation-delay:.12s}} tbody tr:nth-child(4){{animation-delay:.16s}} tbody tr:nth-child(5){{animation-delay:.20s}}
     tbody tr:nth-child(even){{background:var(--surface)}} tbody tr:hover{{background:color-mix(in srgb,var(--accent) 10%,#fff)}}
     tbody tr.podium{{background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 13%,#fff),#fff 60%)}}
     .rank-badge{{display:inline-flex;align-items:center;justify-content:center;min-width:29px;height:29px;background:var(--navy);color:#fff;font-weight:900}}
     tr.podium .rank-badge{{background:var(--accent);color:var(--navy)}}
     .metric{{display:grid;grid-template-columns:minmax(90px,1fr) 70px;align-items:center;gap:9px;min-width:170px}}
-    .track{{height:10px;background:#e8efec;overflow:hidden}} .fill{{height:100%;background:linear-gradient(90deg,var(--accent-dark),var(--accent))}}
+    .track{{height:10px;background:#e8efec;overflow:hidden}} .fill{{height:100%;background:linear-gradient(90deg,var(--accent-dark),var(--accent));transform-origin:left center;animation:fillGrow 1.15s .25s cubic-bezier(.2,.72,.2,1) both}}
     .metric-value{{font-weight:800;color:var(--accent-dark);text-align:right}}
     .footer{{padding:15px clamp(20px,3vw,34px);border-top:1px solid var(--border);background:var(--surface);color:var(--muted);font-size:12.5px}}
     .footer a{{color:var(--accent-dark)}} .empty{{padding:32px;text-align:center;color:var(--muted)}}
     .chart-wrap{{position:relative;overflow:auto;border:1px solid var(--border);background:linear-gradient(180deg,#fff,var(--surface));padding:24px}}
-    .chart-title{{font-family:"Arial Narrow",Impact,Inter,sans-serif;font-size:21px;text-transform:uppercase;letter-spacing:.02em;color:var(--navy);margin:0 0 18px}}
+    .chart-title{{font-family:"Arial Narrow",Impact,Inter,sans-serif;font-size:21px;letter-spacing:.01em;color:var(--navy);margin:0 0 18px}}
     .chart-svg{{display:block;width:100%;height:auto;min-width:620px;overflow:visible}} .grid{{stroke:var(--border);stroke-width:1}}
     .axis-label{{fill:var(--muted);font-size:12px}} .cat-label{{fill:var(--text);font-size:12.5px;font-weight:650}}
-    .value-label{{fill:var(--accent-dark);font-size:12px;font-weight:800}} .bar{{fill:url(#barGradient)}}
-    .line{{fill:none;stroke:var(--accent);stroke-width:4;stroke-linecap:round;stroke-linejoin:round}} .area{{fill:url(#areaGradient)}}
-    .point{{fill:#fff;stroke:var(--accent);stroke-width:3}} .slice{{stroke:#fff;stroke-width:3}}
+    .value-label{{fill:var(--accent-dark);font-size:12px;font-weight:800}} .bar{{fill:url(#barGradient);transform-box:fill-box}}
+    .bar-h{{transform-origin:left center;animation:barGrowX 1.15s .2s cubic-bezier(.2,.72,.2,1) both}}
+    .bar-v{{transform-origin:center bottom;animation:barGrowY 1.15s .2s cubic-bezier(.2,.72,.2,1) both}}
+    .line{{fill:none;stroke:var(--accent);stroke-width:4;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2600;stroke-dashoffset:2600;animation:lineDraw 1.8s .18s cubic-bezier(.2,.72,.2,1) forwards}}
+    .area{{fill:url(#areaGradient);animation:areaFade 1.05s .35s both}} .point{{fill:#fff;stroke:var(--accent);stroke-width:3;transform-box:fill-box;transform-origin:center;animation:pointPop .55s .8s both}}
+    .slice{{stroke:#fff;stroke-width:3;transform-box:fill-box;transform-origin:center;animation:sliceIn .85s cubic-bezier(.2,.72,.2,1) both}}
     .legend{{display:flex;flex-wrap:wrap;gap:9px 18px;margin-top:15px;font-size:12px;color:var(--muted)}}
     .legend i{{display:inline-block;width:9px;height:9px;margin-right:6px}}
+    @keyframes shellRise{{from{{opacity:0;transform:translateY(14px)}}to{{opacity:1;transform:none}}}}
+    @keyframes fadeUp{{from{{opacity:0;transform:translateY(12px)}}to{{opacity:1;transform:none}}}}
+    @keyframes rowRise{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:none}}}}
+    @keyframes fillGrow{{from{{transform:scaleX(0)}}to{{transform:scaleX(1)}}}}
+    @keyframes barGrowX{{from{{transform:scaleX(0);opacity:.35}}to{{transform:scaleX(1);opacity:1}}}}
+    @keyframes barGrowY{{from{{transform:scaleY(0);opacity:.35}}to{{transform:scaleY(1);opacity:1}}}}
+    @keyframes lineDraw{{to{{stroke-dashoffset:0}}}} @keyframes areaFade{{from{{opacity:0}}to{{opacity:1}}}}
+    @keyframes pointPop{{from{{opacity:0;transform:scale(.2)}}to{{opacity:1;transform:scale(1)}}}}
+    @keyframes sliceIn{{from{{opacity:0;transform:scale(.82)}}to{{opacity:1;transform:scale(1)}}}}
     @media(max-width:640px){{.hero{{padding:26px 20px 23px}} h1{{font-size:36px}} .content{{padding:14px}}
       .count{{width:100%;margin:0}} .chart-wrap{{padding:16px}}}}
+    @media(prefers-reduced-motion:reduce){{*,*:before,*:after{{animation-duration:.01ms!important;animation-delay:0s!important;scroll-behavior:auto!important}}}}
     @media print{{.toolbar{{display:none}} .viz-shell{{box-shadow:none}} .table-wrap{{max-height:none;overflow:visible}}}}
+    {preview_css}
     """
 
 
 def hero_html(metadata: dict[str, str]) -> str:
     title = metadata.get("title", "").strip()
     subtitle = metadata.get("subtitle", "").strip()
-    brand = metadata.get("brand", "DATA STUDIO").strip()
+    brand = metadata.get("brand", "Data Studio").strip()
     if not title and not subtitle:
         return ""
     return (
         '<header class="hero">'
-        + (f'<div class="brand">{html.escape(brand)}</div>' if brand else "")
-        + (f"<h1>{html.escape(title)}</h1>" if title else "")
+        + (f'<div class="brand">{html.escape(smart_title_case(brand))}</div>' if brand else "")
+        + (f"<h1>{html.escape(smart_title_case(title))}</h1>" if title else "")
         + (f'<p class="subtitle">{html.escape(subtitle)}</p>' if subtitle else "")
         + "</header>"
     )
@@ -405,7 +508,7 @@ def table_markup(frame: pd.DataFrame, visual_key: str, metric_column: str | None
 
     heads = "".join(
         f'<th data-column="{i}" data-type="{"number" if pd.api.types.is_numeric_dtype(frame[c]) else "text"}">'
-        f'{html.escape(str(c))}<span class="sort">↕</span></th>'
+        f'{html.escape(smart_title_case(c))}<span class="sort">↕</span></th>'
         for i, c in enumerate(columns)
     )
 
@@ -422,7 +525,7 @@ def table_markup(frame: pd.DataFrame, visual_key: str, metric_column: str | None
         for column in columns:
             raw = row[column]
             raw_values.append(None if pd.isna(raw) else json_safe(raw))
-            display = html.escape(format_value(raw, column, frame[column]))
+            display = animated_number_markup(raw, column, frame[column])
             if visual_key == "ranking_table" and column == rank_column:
                 display = f'<span class="rank-badge">{display}</span>'
             elif visual_key == "ranking_table" and column == metric_column and not pd.isna(raw):
@@ -505,7 +608,7 @@ def chart_markup(
     min_value = min(0, min(values) if values else 0)
     span = max(max_value - min_value, 1e-9)
     parts = [
-        f'<svg class="chart-svg" viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(value_column)} by {html.escape(label_column)}">',
+        f'<svg class="chart-svg" viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(smart_title_case(value_column))} by {html.escape(smart_title_case(label_column))}">',
         '<defs><linearGradient id="barGradient" x1="0" x2="1"><stop offset="0" stop-color="var(--accent-dark)"/><stop offset="1" stop-color="var(--accent)"/></linearGradient>',
         '<linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".45"/><stop offset="1" stop-color="var(--accent)" stop-opacity=".03"/></linearGradient></defs>',
     ]
@@ -518,8 +621,8 @@ def chart_markup(
             y = top + i * gap + (gap - bar_h) / 2
             bar_w = max(1, (value - min_value) / span * plot_w)
             parts.append(f'<text class="cat-label" x="{label_x}" y="{y + bar_h * .72:.1f}" text-anchor="end">{html.escape(label[:28])}</text>')
-            parts.append(f'<rect class="bar" x="{left}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" rx="2"><title>{html.escape(label)}: {html.escape(format_value(value, value_column, data[value_column]))}</title></rect>')
-            parts.append(f'<text class="value-label" x="{min(left + bar_w + 8, width - right)}" y="{y + bar_h * .72:.1f}">{html.escape(nice_number(value))}</text>')
+            parts.append(f'<rect class="bar bar-h" x="{left}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" rx="2"><title>{html.escape(label)}: {html.escape(format_value(value, value_column, data[value_column]))}</title></rect>')
+            parts.append(f'<text class="value-label" data-animate-number="{value}" data-number-kind="compact" x="{min(left + bar_w + 8, width - right)}" y="{y + bar_h * .72:.1f}">{html.escape(nice_number(value))}</text>')
     elif visual_key == "bar_vertical":
         gap = plot_w / max(len(values), 1)
         bar_w = min(56, gap * 0.62)
@@ -527,8 +630,8 @@ def chart_markup(
             bar_h = max(1, (value - min_value) / span * plot_h)
             x = left + i * gap + (gap - bar_w) / 2
             y = top + plot_h - bar_h
-            parts.append(f'<rect class="bar" x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" rx="3"><title>{html.escape(label)}: {html.escape(format_value(value, value_column, data[value_column]))}</title></rect>')
-            parts.append(f'<text class="value-label" x="{x + bar_w/2:.1f}" y="{max(16,y-8):.1f}" text-anchor="middle">{html.escape(nice_number(value))}</text>')
+            parts.append(f'<rect class="bar bar-v" x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" rx="3"><title>{html.escape(label)}: {html.escape(format_value(value, value_column, data[value_column]))}</title></rect>')
+            parts.append(f'<text class="value-label" data-animate-number="{value}" data-number-kind="compact" x="{x + bar_w/2:.1f}" y="{max(16,y-8):.1f}" text-anchor="middle">{html.escape(nice_number(value))}</text>')
             parts.append(f'<text class="cat-label" x="{x + bar_w/2:.1f}" y="{top + plot_h + 22:.1f}" text-anchor="middle">{html.escape(label[:14])}</text>')
     elif visual_key in {"line", "area"}:
         count = max(len(values), 1)
@@ -558,14 +661,14 @@ def chart_markup(
             length = value / total * circumference
             parts.append(f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{colors[i % len(colors)]}" stroke-width="{stroke}" stroke-dasharray="{length:.3f} {circumference-length:.3f}" stroke-dashoffset="{-offset:.3f}" transform="rotate(-90 {cx} {cy})" class="slice"><title>{html.escape(label)}: {value/total*100:.1f}%</title></circle>')
             offset += length
-        parts.append(f'<text x="{cx}" y="{cy-3}" text-anchor="middle" style="font-size:30px;font-weight:900;fill:var(--navy)">{html.escape(nice_number(total))}</text>')
-        parts.append(f'<text x="{cx}" y="{cy+22}" text-anchor="middle" class="axis-label">TOTAL</text>')
+        parts.append(f'<text x="{cx}" y="{cy-3}" text-anchor="middle" data-animate-number="{total}" data-number-kind="compact" style="font-size:30px;font-weight:900;fill:var(--navy)">{html.escape(nice_number(total))}</text>')
+        parts.append(f'<text x="{cx}" y="{cy+22}" text-anchor="middle" class="axis-label">Total</text>')
         legend_x, legend_y = 650, 95
         for i, (label, value) in enumerate(zip(labels[:8], positive[:8])):
             y = legend_y + i * 38
             parts.append(f'<rect x="{legend_x}" y="{y-11}" width="12" height="12" fill="{colors[i % len(colors)]}"/>')
             parts.append(f'<text class="cat-label" x="{legend_x+20}" y="{y}">{html.escape(label[:24])}</text>')
-            parts.append(f'<text class="value-label" x="{width-right}" y="{y}" text-anchor="end">{value/total*100:.1f}%</text>')
+            parts.append(f'<text class="value-label" data-animate-number="{value/total*100}" data-number-kind="percent" x="{width-right}" y="{y}" text-anchor="end">{value/total*100:.1f}%</text>')
     elif visual_key == "scatter":
         if not second_value or second_value not in data:
             return '<div class="empty">Choose a second numeric measure for a scatter plot.</div>'
@@ -581,9 +684,9 @@ def chart_markup(
         for label, x_value, y_value in zip(point_labels, xs, y_values):
             x = left + (x_value-min_x)/span_x*plot_w
             y = top + plot_h - (y_value-min_y)/span_y*plot_h
-            parts.append(f'<circle class="point" cx="{x:.1f}" cy="{y:.1f}" r="7"><title>{html.escape(label)} — {html.escape(value_column)}: {x_value:g}; {html.escape(second_value)}: {y_value:g}</title></circle>')
-        parts.append(f'<text class="axis-label" x="{left+plot_w/2}" y="{height-20}" text-anchor="middle">{html.escape(value_column)}</text>')
-        parts.append(f'<text class="axis-label" x="22" y="{top+plot_h/2}" text-anchor="middle" transform="rotate(-90 22 {top+plot_h/2})">{html.escape(second_value)}</text>')
+            parts.append(f'<circle class="point" cx="{x:.1f}" cy="{y:.1f}" r="7"><title>{html.escape(label)} — {html.escape(smart_title_case(value_column))}: {x_value:g}; {html.escape(smart_title_case(second_value))}: {y_value:g}</title></circle>')
+        parts.append(f'<text class="axis-label" x="{left+plot_w/2}" y="{height-20}" text-anchor="middle">{html.escape(smart_title_case(value_column))}</text>')
+        parts.append(f'<text class="axis-label" x="22" y="{top+plot_h/2}" text-anchor="middle" transform="rotate(-90 22 {top+plot_h/2})">{html.escape(smart_title_case(second_value))}</text>')
 
     parts.append("</svg>")
     return "".join(parts)
@@ -599,42 +702,45 @@ def generate_html(
     second_value: str | None = None,
     metric_column: str | None = None,
     row_limit: int = 20,
+    preview: bool = False,
 ) -> str:
     metadata = {k: str(v) for k, v in metadata.items() if v is not None}
     theme = merge_theme(theme_name, metadata.get("accent", ""))
     visual = next((v for v in VISUALS if v["key"] == visual_key), VISUALS[0])
     compact = visual_key == "compact_table"
-    css = base_css(theme, compact=compact)
+    css = base_css(theme, compact=compact, preview=preview)
+    render_frame = frame.head(6).copy() if preview else frame
     title = metadata.get("title", "Data visualisation")
     hero = hero_html(metadata)
     footer = footer_html(metadata)
 
     if visual["kind"] == "table":
-        table, table_script = table_markup(frame, visual_key, metric_column)
+        table, table_script = table_markup(render_frame, visual_key, metric_column)
         body = f"""
         <main class="content">
           <div class="toolbar">
             <label class="search"><input id="tableSearch" type="search" placeholder="Search this table" aria-label="Search this table"></label>
-            <button class="btn" id="downloadCsv" type="button">Download CSV</button>
+            <button class="btn" id="downloadCsv" type="button">Download Data</button>
             <span class="count" id="rowCount"></span>
           </div>
           <div class="table-wrap">{table}</div>
         </main>
         """
-        script = table_script
+        script = table_script + animation_script()
     else:
-        numeric = numeric_columns(frame)
-        label_column = label_column if label_column in frame.columns else str(frame.columns[0])
+        numeric = numeric_columns(render_frame)
+        label_column = label_column if label_column in render_frame.columns else str(render_frame.columns[0])
         value_column = value_column if value_column in numeric else (numeric[0] if numeric else str(frame.columns[-1]))
-        chart = chart_markup(frame, visual_key, label_column, value_column, second_value, row_limit)
-        body = f'<main class="content"><div class="chart-wrap"><h2 class="chart-title">{html.escape(value_column)} by {html.escape(label_column)}</h2>{chart}</div></main>'
-        script = ""
+        chart = chart_markup(render_frame, visual_key, label_column, value_column, second_value, min(row_limit, 8) if preview else row_limit)
+        chart_heading = f"{smart_title_case(value_column)} by {smart_title_case(label_column)}"
+        body = f'<main class="content"><div class="chart-wrap"><h2 class="chart-title">{html.escape(chart_heading)}</h2>{chart}</div></main>'
+        script = animation_script()
 
     return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="{html.escape(metadata.get('subtitle','Interactive data visualisation'), quote=True)}">
-<title>{html.escape(title)}</title><style>{css}</style></head>
+<title>{html.escape(smart_title_case(title))}</title><style>{css}</style></head>
 <body><article class="viz-shell">{hero}{body}{footer}</article><script>{script}</script></body></html>"""
 
 
@@ -650,10 +756,10 @@ def sample_dataset() -> Dataset:
     )
     metadata = {
         "title": "The 2026 State Sports Index",
-        "subtitle": "A demonstration dataset showing how the builder turns an ordinary CSV into an editorial interactive.",
+        "subtitle": "A demonstration dataset showing how the builder turns an ordinary data file into an editorial interactive.",
         "footer": "Scores shown for demonstration only.",
         "source": "Example data",
-        "brand": "ACTION NETWORK · DATA STUDIO",
+        "brand": "Action Network · Data Studio",
     }
     return Dataset(frame, metadata)
 
@@ -669,17 +775,20 @@ def run_app() -> None:
         [data-testid="stSidebar"]{background:#101820;color:#fff}
         [data-testid="stSidebar"] label,[data-testid="stSidebar"] p{color:#e9f4ef!important}
         div[data-testid="stFileUploader"]{background:#fff;border:1px solid #dfe7e3;padding:12px}
-        .carousel-card{min-height:124px;padding:18px 22px;border:1px solid #dfe7e3;border-top:4px solid #00b67a;background:#fff;box-shadow:0 10px 28px rgba(16,24,32,.07)}
-        .carousel-card h3{margin:0 0 6px;color:#101820}.carousel-card p{margin:0;color:#66747d}.dots{text-align:center;color:#a9b5af;letter-spacing:5px}.dots b{color:#00b67a}
+        div[data-testid="stFileUploader"] small{display:none!important}
+        .carousel-card{padding:17px 22px;border:1px solid #dfe7e3;border-top:4px solid #00b67a;border-radius:7px;background:#fff;box-shadow:0 14px 34px rgba(16,24,32,.09);animation:carouselRise .55s cubic-bezier(.2,.72,.2,1) both}
+        .carousel-card h3{margin:0 0 5px;color:#101820;font-size:1.55rem}.carousel-card p{margin:0;color:#66747d}.dots{text-align:center;color:#a9b5af;letter-spacing:5px;margin-top:5px}.dots b{color:#00b67a}
+        div[data-testid="stIFrame"]{border:1px solid #dfe7e3;border-radius:7px;overflow:hidden;box-shadow:0 12px 30px rgba(16,24,32,.08)}
+        @keyframes carouselRise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
         </style>""",
         unsafe_allow_html=True,
     )
 
     st.title("Automatic Table & Chart Builder")
-    st.caption("Upload CSV or Excel data, choose a sleek layout, preview it and download standalone HTML.")
+    st.caption("Upload a data file, choose a sleek layout, preview it and download a standalone web page.")
 
-    uploaded = st.file_uploader("Upload CSV, TSV, XLS or XLSX", type=["csv", "tsv", "txt", "xls", "xlsx", "xlsm"])
-    use_demo = st.checkbox("Use demonstration data", value=uploaded is None)
+    uploaded = st.file_uploader("Upload a Data File", type=["csv", "tsv", "txt", "xls", "xlsx", "xlsm"])
+    use_demo = st.checkbox("Use Demonstration Data", value=uploaded is None)
 
     if uploaded is None and not use_demo:
         st.info("Upload a file or turn on demonstration data to begin.")
@@ -698,56 +807,12 @@ def run_app() -> None:
         st.header("Content")
         title = st.text_input("Heading", value=metadata.get("title", ""), placeholder="Optional")
         subtitle = st.text_area("Subtitle", value=metadata.get("subtitle", ""), placeholder="Optional", height=90)
-        footer = st.text_area("Footer note", value=metadata.get("footer", ""), placeholder="Optional", height=75)
-        source = st.text_input("Source label", value=metadata.get("source", ""), placeholder="Optional")
-        source_url = st.text_input("Source URL", value=metadata.get("source_url", ""), placeholder="Optional")
-        brand = st.text_input("Brand line", value=metadata.get("brand", "ACTION NETWORK · DATA STUDIO"))
+        footer = st.text_area("Footer Note", value=metadata.get("footer", ""), placeholder="Optional", height=75)
+        source = st.text_input("Source Label", value=metadata.get("source", ""), placeholder="Optional")
+        source_url = st.text_input("Source Link", value=metadata.get("source_url", ""), placeholder="Optional")
+        brand = st.text_input("Brand Line", value=metadata.get("brand", "Action Network · Data Studio"))
         st.header("Appearance")
-        theme_name = st.selectbox("Colour theme", list(THEMES), index=0)
-
-    if "visual_index" not in st.session_state:
-        st.session_state.visual_index = 0
-    previous, card, nxt = st.columns([1, 6, 1])
-    with previous:
-        if st.button("←", use_container_width=True, help="Previous design"):
-            st.session_state.visual_index = (st.session_state.visual_index - 1) % len(VISUALS)
-            st.session_state.visual_jump = st.session_state.visual_index
-    with nxt:
-        if st.button("→", use_container_width=True, help="Next design"):
-            st.session_state.visual_index = (st.session_state.visual_index + 1) % len(VISUALS)
-            st.session_state.visual_jump = st.session_state.visual_index
-    selected = VISUALS[st.session_state.visual_index]
-    with card:
-        st.markdown(f'<div class="carousel-card"><h3>{selected["name"]}</h3><p>{selected["description"]}</p></div>', unsafe_allow_html=True)
-        dots = " ".join("<b>●</b>" if i == st.session_state.visual_index else "●" for i in range(len(VISUALS)))
-        st.markdown(f'<div class="dots">{dots}</div>', unsafe_allow_html=True)
-
-    def jump_to_visual() -> None:
-        st.session_state.visual_index = st.session_state.visual_jump
-
-    st.selectbox(
-        "Jump directly to a design",
-        range(len(VISUALS)),
-        index=st.session_state.visual_index,
-        format_func=lambda i: VISUALS[i]["name"],
-        key="visual_jump",
-        on_change=jump_to_visual,
-    )
-    selected = VISUALS[st.session_state.visual_index]
-
-    numerics = numeric_columns(frame)
-    categoricals = categorical_columns(frame)
-    label_default = categoricals[0] if categoricals else str(frame.columns[0])
-    value_default = numerics[0] if numerics else str(frame.columns[-1])
-    control_cols = st.columns(4)
-    label_column = control_cols[0].selectbox("Category / label", list(frame.columns), index=list(frame.columns).index(label_default))
-    value_column = control_cols[1].selectbox("Primary measure", numerics or list(frame.columns), index=0)
-    second_options = ["None"] + numerics
-    second_pick = control_cols[2].selectbox("Second measure", second_options, index=0)
-    second_value = None if second_pick == "None" else second_pick
-    metric_column = control_cols[3].selectbox("Ranking data bar", ["None"] + numerics, index=1 if numerics else 0)
-    metric_column = None if metric_column == "None" else metric_column
-    row_limit = st.slider("Maximum chart categories", 3, 30, min(12, max(3, len(frame))))
+        theme_name = st.selectbox("Colour Theme", list(THEMES), index=0)
 
     final_metadata = {
         "title": title,
@@ -758,6 +823,74 @@ def run_app() -> None:
         "brand": brand,
         "accent": metadata.get("accent", ""),
     }
+    numerics = numeric_columns(frame)
+    categoricals = categorical_columns(frame)
+    label_default = categoricals[0] if categoricals else str(frame.columns[0])
+    value_default = numerics[0] if numerics else str(frame.columns[-1])
+    second_default = numerics[1] if len(numerics) > 1 else None
+
+    if "visual_index" not in st.session_state:
+        st.session_state.visual_index = 0
+    previous, card, nxt = st.columns([1, 6, 1])
+    with previous:
+        if st.button("←", use_container_width=True, help="Previous Design"):
+            st.session_state.visual_index = (st.session_state.visual_index - 1) % len(VISUALS)
+            st.session_state.visual_jump = st.session_state.visual_index
+    with nxt:
+        if st.button("→", use_container_width=True, help="Next Design"):
+            st.session_state.visual_index = (st.session_state.visual_index + 1) % len(VISUALS)
+            st.session_state.visual_jump = st.session_state.visual_index
+    selected = VISUALS[st.session_state.visual_index]
+    with card:
+        st.markdown(f'<div class="carousel-card"><h3>{selected["name"]}</h3><p>{selected["description"]}</p></div>', unsafe_allow_html=True)
+        miniature_html = generate_html(
+            frame,
+            final_metadata,
+            visual_key=selected["key"],
+            theme_name=theme_name,
+            label_column=label_default,
+            value_column=value_default,
+            second_value=second_default,
+            metric_column=value_default if value_default in numerics else None,
+            row_limit=8,
+            preview=True,
+        )
+        components.html(miniature_html, height=350, scrolling=False)
+        dots = " ".join("<b>●</b>" if i == st.session_state.visual_index else "●" for i in range(len(VISUALS)))
+        st.markdown(f'<div class="dots">{dots}</div>', unsafe_allow_html=True)
+
+    def jump_to_visual() -> None:
+        st.session_state.visual_index = st.session_state.visual_jump
+
+    st.selectbox(
+        "Jump Directly to a Design",
+        range(len(VISUALS)),
+        index=st.session_state.visual_index,
+        format_func=lambda i: VISUALS[i]["name"],
+        key="visual_jump",
+        on_change=jump_to_visual,
+    )
+    selected = VISUALS[st.session_state.visual_index]
+
+    control_cols = st.columns(4)
+    label_column = control_cols[0].selectbox(
+        "Category / Label",
+        list(frame.columns),
+        index=list(frame.columns).index(label_default),
+        format_func=smart_title_case,
+    )
+    value_column = control_cols[1].selectbox("Primary Measure", numerics or list(frame.columns), index=0, format_func=smart_title_case)
+    second_options = ["None"] + numerics
+    second_pick = control_cols[2].selectbox("Second Measure", second_options, index=0, format_func=smart_title_case)
+    second_value = None if second_pick == "None" else second_pick
+    metric_column = control_cols[3].selectbox(
+        "Ranking Data Bar",
+        ["None"] + numerics,
+        index=1 if numerics else 0,
+        format_func=smart_title_case,
+    )
+    metric_column = None if metric_column == "None" else metric_column
+    row_limit = st.slider("Maximum Chart Categories", 3, 30, min(12, max(3, len(frame))))
     output_html = generate_html(
         frame,
         final_metadata,
@@ -770,11 +903,12 @@ def run_app() -> None:
         row_limit=row_limit,
     )
 
-    preview_tab, data_tab, help_tab = st.tabs(["Preview", "Data", "CSV format"])
+    preview_tab, data_tab, help_tab = st.tabs(["Preview", "Data", "File Format"])
     with preview_tab:
         components.html(output_html, height=820, scrolling=True)
     with data_tab:
-        st.dataframe(frame, use_container_width=True, height=520)
+        display_frame = frame.rename(columns={column: smart_title_case(column) for column in frame.columns})
+        st.dataframe(display_frame, use_container_width=True, height=520)
         st.caption(f"{len(frame):,} rows · {len(frame.columns)} columns")
     with help_tab:
         st.code(
@@ -783,7 +917,7 @@ def run_app() -> None:
 # footer: Optional note shown below the visual
 # source: Optional source label
 # source_url: https://example.com/optional-source
-# brand: ACTION NETWORK · DATA STUDIO
+# brand: Action Network · Data Studio
 
 Rank,State,Score,Implied Probability
 1,California,92.4,12.8
@@ -791,16 +925,16 @@ Rank,State,Score,Implied Probability
 3,Utah,85.1,11.1""",
             language="text",
         )
-        st.write("All `#` metadata lines are optional. A normal CSV beginning with its header row works too.")
+        st.write("All `#` metadata lines are optional. A normal data file beginning with its header row works too.")
 
     filename = safe_id(title or "data-visualisation") + ".html"
-    st.download_button("Download selected HTML", output_html.encode("utf-8"), filename, "text/html", type="primary")
-    st.download_button("Download cleaned CSV", frame.to_csv(index=False).encode("utf-8"), "cleaned-data.csv", "text/csv")
+    st.download_button("Download Selected Web Page", output_html.encode("utf-8"), filename, "text/html", type="primary")
+    st.download_button("Download Cleaned Data", frame.to_csv(index=False).encode("utf-8"), "cleaned-data.csv", "text/csv")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--demo-output", type=Path, help="Write a demonstration HTML file and exit.")
+    parser.add_argument("--demo-output", type=Path, help="Write a demonstration web page and exit.")
     args = parser.parse_args()
     if args.demo_output:
         sample = sample_dataset()
