@@ -392,12 +392,14 @@ def base_css(theme: dict[str, str], compact: bool = False, preview: bool = False
     pad = "10px 12px" if compact else "14px 15px"
     font_size = "13px" if compact else "14.5px"
     preview_css = """
-    .viz-shell{box-shadow:none;border-radius:4px}.hero{padding:18px 22px 17px}h1{font-size:28px;margin:5px 0 6px}
-    .brand{font-size:9px}.subtitle{font-size:11px;line-height:1.35}.content{padding:12px}.toolbar{margin-bottom:8px}
-    .toolbar .btn{display:none}.search input{padding:7px 10px 7px 30px;font-size:11px}.search:before{left:10px;top:3px}
-    .table-wrap{max-height:185px}table{min-width:560px;font-size:9.5px}thead th,tbody td{padding:7px 8px}
-    thead th{font-size:8px}.rank-badge{min-width:21px;height:21px}.metric{min-width:115px;grid-template-columns:1fr 45px}
-    .chart-wrap{padding:13px}.chart-title{font-size:14px;margin-bottom:8px}.chart-svg{min-width:0}.footer{padding:7px 12px;font-size:8.5px}
+    body{line-height:1.2}.viz-shell{height:164px;box-shadow:none;border:0;border-radius:5px}
+    .hero{padding:9px 10px 8px;min-height:39px}.brand,.subtitle,.footer{display:none}
+    h1{font-family:Inter,ui-sans-serif,sans-serif;font-size:11px;line-height:1.15;margin:0;letter-spacing:0}
+    .content{padding:6px}.toolbar{display:none}.table-wrap{height:113px;max-height:113px;overflow:hidden;border-radius:3px}
+    table{min-width:0;font-size:6.5px}thead th,tbody td{padding:4px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:48px}
+    thead th{font-size:6px;position:static}.rank-badge{min-width:15px;height:15px}.metric{display:block;min-width:0}.metric .track{display:none}
+    .chart-wrap{height:113px;padding:5px;overflow:hidden}.chart-title{font-family:Inter,ui-sans-serif,sans-serif;font-size:8px;margin:0 0 2px}
+    .chart-svg{width:100%;height:95px;min-width:0}.axis-label{font-size:8px}.cat-label{font-size:8px}.value-label{font-size:8px}
     """ if preview else ""
     return f"""
     :root{{--accent:{theme['accent']};--accent-bright:{theme['accent_bright']};--accent-dark:{theme['accent_dark']};
@@ -776,10 +778,13 @@ def run_app() -> None:
         [data-testid="stSidebar"] label,[data-testid="stSidebar"] p{color:#e9f4ef!important}
         div[data-testid="stFileUploader"]{background:#fff;border:1px solid #dfe7e3;padding:12px}
         div[data-testid="stFileUploader"] small{display:none!important}
-        .carousel-card{padding:17px 22px;border:1px solid #dfe7e3;border-top:4px solid #00b67a;border-radius:7px;background:#fff;box-shadow:0 14px 34px rgba(16,24,32,.09);animation:carouselRise .55s cubic-bezier(.2,.72,.2,1) both}
-        .carousel-card h3{margin:0 0 5px;color:#101820;font-size:1.55rem}.carousel-card p{margin:0;color:#66747d}.dots{text-align:center;color:#a9b5af;letter-spacing:5px;margin-top:5px}.dots b{color:#00b67a}
-        div[data-testid="stIFrame"]{border:1px solid #dfe7e3;border-radius:7px;overflow:hidden;box-shadow:0 12px 30px rgba(16,24,32,.08)}
-        @keyframes carouselRise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+        div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"]{background:#fff;border:1px solid #dfe7e3;border-radius:9px;box-shadow:0 8px 22px rgba(16,24,32,.06);padding:.42rem;transition:transform .2s,box-shadow .2s,border-color .2s}
+        div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"]:hover{transform:translateY(-3px);border-color:#00b67a;box-shadow:0 13px 28px rgba(16,24,32,.11)}
+        div[data-testid="stColumn"] div[data-testid="stIFrame"]{border:0;border-radius:5px;overflow:hidden;box-shadow:none}
+        div[data-testid="stColumn"] .stButton button{min-height:2.55rem;font-weight:750;border-radius:5px}
+        .gallery-note{margin:.1rem 0 1rem;color:#66747d}
+        .selected-design{padding:13px 16px;margin:10px 0 14px;border-left:4px solid #00b67a;border-radius:5px;background:#fff;box-shadow:0 8px 22px rgba(16,24,32,.05)}
+        .selected-design strong{display:block;color:#101820;font-size:1.05rem;margin-bottom:2px}.selected-design span{color:#66747d;font-size:.9rem}
         </style>""",
         unsafe_allow_html=True,
     )
@@ -829,48 +834,69 @@ def run_app() -> None:
     value_default = numerics[0] if numerics else str(frame.columns[-1])
     second_default = numerics[1] if len(numerics) > 1 else None
 
+    cards_per_page = 10
+    total_gallery_pages = max(1, math.ceil(len(VISUALS) / cards_per_page))
     if "visual_index" not in st.session_state:
         st.session_state.visual_index = 0
-    previous, card, nxt = st.columns([1, 6, 1])
-    with previous:
-        if st.button("←", use_container_width=True, help="Previous Design"):
-            st.session_state.visual_index = (st.session_state.visual_index - 1) % len(VISUALS)
-            st.session_state.visual_jump = st.session_state.visual_index
-    with nxt:
-        if st.button("→", use_container_width=True, help="Next Design"):
-            st.session_state.visual_index = (st.session_state.visual_index + 1) % len(VISUALS)
-            st.session_state.visual_jump = st.session_state.visual_index
+    if "gallery_page" not in st.session_state:
+        st.session_state.gallery_page = 0
+    st.session_state.gallery_page = min(st.session_state.gallery_page, total_gallery_pages - 1)
+
+    st.subheader("Choose a Design")
+    st.markdown('<div class="gallery-note">Select any preview card to apply that design instantly.</div>', unsafe_allow_html=True)
+    page_start = st.session_state.gallery_page * cards_per_page
+    page_visuals = list(enumerate(VISUALS[page_start:page_start + cards_per_page], start=page_start))
+    for row_start in range(0, len(page_visuals), 5):
+        gallery_columns = st.columns(5, gap="small")
+        for column, (visual_index, visual) in zip(gallery_columns, page_visuals[row_start:row_start + 5]):
+            with column:
+                with st.container(border=True):
+                    miniature_html = generate_html(
+                        frame,
+                        final_metadata,
+                        visual_key=visual["key"],
+                        theme_name=theme_name,
+                        label_column=label_default,
+                        value_column=value_default,
+                        second_value=second_default,
+                        metric_column=value_default if value_default in numerics else None,
+                        row_limit=6,
+                        preview=True,
+                    )
+                    components.html(miniature_html, height=164, scrolling=False)
+                    is_selected = visual_index == st.session_state.visual_index
+                    button_label = f'{"Selected: " if is_selected else ""}{visual["name"]}'
+                    if st.button(
+                        button_label,
+                        key=f"design_card_{visual['key']}",
+                        use_container_width=True,
+                        type="primary" if is_selected else "secondary",
+                        help=visual["description"],
+                    ):
+                        st.session_state.visual_index = visual_index
+                        st.rerun()
+
+    if total_gallery_pages > 1:
+        previous_page, page_status, next_page = st.columns([1, 3, 1])
+        with previous_page:
+            if st.button("Previous Designs", disabled=st.session_state.gallery_page == 0, use_container_width=True):
+                st.session_state.gallery_page -= 1
+                st.rerun()
+        with page_status:
+            st.markdown(
+                f'<p style="text-align:center;color:#66747d">Page {st.session_state.gallery_page + 1} of {total_gallery_pages}</p>',
+                unsafe_allow_html=True,
+            )
+        with next_page:
+            if st.button("Next Designs", disabled=st.session_state.gallery_page >= total_gallery_pages - 1, use_container_width=True):
+                st.session_state.gallery_page += 1
+                st.rerun()
+
     selected = VISUALS[st.session_state.visual_index]
-    with card:
-        st.markdown(f'<div class="carousel-card"><h3>{selected["name"]}</h3><p>{selected["description"]}</p></div>', unsafe_allow_html=True)
-        miniature_html = generate_html(
-            frame,
-            final_metadata,
-            visual_key=selected["key"],
-            theme_name=theme_name,
-            label_column=label_default,
-            value_column=value_default,
-            second_value=second_default,
-            metric_column=value_default if value_default in numerics else None,
-            row_limit=8,
-            preview=True,
-        )
-        components.html(miniature_html, height=350, scrolling=False)
-        dots = " ".join("<b>●</b>" if i == st.session_state.visual_index else "●" for i in range(len(VISUALS)))
-        st.markdown(f'<div class="dots">{dots}</div>', unsafe_allow_html=True)
-
-    def jump_to_visual() -> None:
-        st.session_state.visual_index = st.session_state.visual_jump
-
-    st.selectbox(
-        "Jump Directly to a Design",
-        range(len(VISUALS)),
-        index=st.session_state.visual_index,
-        format_func=lambda i: VISUALS[i]["name"],
-        key="visual_jump",
-        on_change=jump_to_visual,
+    st.markdown(
+        f'<div class="selected-design"><strong>{selected["name"]}</strong><span>{selected["description"]}</span></div>',
+        unsafe_allow_html=True,
     )
-    selected = VISUALS[st.session_state.visual_index]
 
     control_cols = st.columns(4)
     label_column = control_cols[0].selectbox(
